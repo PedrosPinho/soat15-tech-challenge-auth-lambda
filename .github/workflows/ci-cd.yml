@@ -1,0 +1,193 @@
+name: CI/CD
+
+# Duas Lambdas (Node.js/TypeScript) + o Terraform que as provisiona, no mesmo
+# repositório. Depende de db-infra já aplicado (VPC, SG, senha do RDS via
+# terraform_remote_state) — aplicar depois dele. A fase 2 do apply (VPC Link,
+# var.enable_vpc_link_integration=true) é manual, feita só depois que a aplicação
+# principal estiver com o Service LoadBalancer no ar (ver terraform/README.md) —
+# este pipeline sempre aplica com o default atual das variáveis, não tenta
+# detectar a fase automaticamente.
+#
+# Sem "lint" no package.json (nenhum eslint configurado neste repo ainda) — o
+# type-check faz esse papel por ora.
+#
+# Credenciais: sessão temporária do AWS Academy Learner Lab (sem OIDC — IAM
+# bloqueado). AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN em GitHub
+# Secrets, renovados por scripts/refresh-aws-secrets.sh (repo da aplicação) no
+# início de cada sessão — se falhar com ExpiredToken, rode o script de novo.
+
+on:
+  pull_request:
+    branches: [main, homolog]
+  push:
+    branches: [main, homolog]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.9.5"
+
+jobs:
+  test:
+    name: Type-check + testes unitários
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run type-check
+
+      - run: npm run test:coverage
+
+  build:
+    name: Build (esbuild)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-dist
+          path: dist/
+          retention-days: 1
+
+  terraform-fmt-validate:
+    name: terraform fmt + validate + tflint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform fmt -check -recursive
+
+      - run: terraform init -backend=false
+
+      - run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint
+        continue-on-error: true
+        run: |
+          tflint --init
+          tflint -f compact
+
+  plan:
+    name: Plan
+    needs: [build, terraform-fmt-validate]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init
+
+      - name: Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -no-color -input=false -out=tfplan | tee plan-output.txt
+          {
+            echo "plan<<PLAN_EOF"
+            tail -c 60000 plan-output.txt
+            echo "PLAN_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comentar plan no PR
+        uses: actions/github-script@v7
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+        with:
+          script: |
+            const body = `## Terraform Plan — auth-lambda\n<details><summary>Ver plano</summary>\n\n\`\`\`\n${process.env.PLAN}\n\`\`\`\n</details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  apply:
+    name: Apply + smoke test
+    needs: [build, terraform-fmt-validate]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'homolog' }}
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init
+
+      - run: terraform apply -auto-approve -input=false
+
+      - name: Teste de fumaça — invocar a Lambda de token com um CPF de fixture
+        # Não exige que o CPF esteja cadastrado: um 400/404/403 estruturado já
+        # prova que a Lambda subiu, alcançou o RDS e respondeu no formato
+        # esperado (ver src/token/handler.ts) — só um 5xx/timeout é falha real.
+        run: |
+          FUNCTION_NAME=$(terraform output -raw token_function_name)
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" \
+            --payload "$(echo '{"cpf":"52998224725"}' | base64)" \
+            --cli-binary-format raw-in-base64-out \
+            response.json
+          cat response.json
+          STATUS_CODE=$(node -e "console.log(JSON.parse(require('fs').readFileSync('response.json')).statusCode)")
+          echo "Lambda respondeu com statusCode $STATUS_CODE"
+          case "$STATUS_CODE" in
+            200|400|403|404) exit 0 ;;
+            *) echo "::error::statusCode inesperado: $STATUS_CODE" && exit 1 ;;
+          esac
