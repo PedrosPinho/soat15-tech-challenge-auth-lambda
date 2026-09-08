@@ -72,7 +72,6 @@ resource "aws_apigatewayv2_stage" "default" {
       protocol         = "$context.protocol"
       responseLength   = "$context.responseLength"
       integrationError = "$context.integration.error"
-      correlationId    = "$context.requestHeaderValue.x-correlation-id"
     })
   }
 }

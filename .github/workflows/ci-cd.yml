@@ -108,6 +108,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Empacotar as Lambdas (esbuild + zip) — terraform lê os .zip em dist/
+        run: npm run package
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
@@ -163,6 +173,16 @@ jobs:
         working-directory: terraform
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Empacotar as Lambdas (esbuild + zip) — terraform lê os .zip em dist/
+        run: npm run package
 
       - uses: hashicorp/setup-terraform@v3
         with:
