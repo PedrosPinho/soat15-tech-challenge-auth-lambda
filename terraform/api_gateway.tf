@@ -150,13 +150,14 @@ resource "aws_security_group" "vpc_link" {
 
 # Localiza dinamicamente o NLB interno criado pelo AWS Load Balancer Controller a
 # partir do Service Kubernetes tipo LoadBalancer da aplicacao (repositorio principal,
-# k8s/service.yaml). A tag `kubernetes.io/service-name` e aplicada automaticamente
-# pelo controller no formato "<namespace>/<nome-do-service>".
+# k8s/service.yaml). Controller v3.x tageia com `service.k8s.aws/stack` (não mais
+# `kubernetes.io/service-name`, usada só por versões antigas) no formato
+# "<namespace>/<nome-do-service>".
 data "aws_lb" "eks_internal_nlb" {
   count = var.enable_vpc_link_integration ? 1 : 0
 
   tags = {
-    "kubernetes.io/service-name" = var.eks_service_tag_value
+    "service.k8s.aws/stack" = var.eks_service_tag_value
   }
 }
 

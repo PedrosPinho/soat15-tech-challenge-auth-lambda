@@ -54,16 +54,18 @@ variable "throttling_rate_limit" {
 
 variable "eks_service_tag_value" {
   description = <<-EOT
-    Valor da tag `kubernetes.io/service-name` usada para localizar dinamicamente
+    Valor da tag `service.k8s.aws/stack` usada para localizar dinamicamente
     (via `data "aws_lb"`) o Network Load Balancer interno criado pelo AWS Load
     Balancer Controller a partir do Service Kubernetes da aplicacao principal.
 
     Formato aplicado automaticamente pelo controller: "<namespace>/<nome-do-service>".
-    Confirmar o valor exato (namespace e nome do Service definidos em
-    k8s-infra/repositorio da aplicacao) antes da fase 2 do apply -- ver README.
+    O namespace real e "oficina-homolog"/"oficina-prod" (nao "oficina" -- ver
+    NAMESPACE em soat15-tech-challenge-01/.github/workflows/ci-cd.yml), por
+    isso o pipeline deste repo exporta TF_VAR_eks_service_tag_value calculado
+    a partir do workspace em vez de usar so o default abaixo.
   EOT
   type        = string
-  default     = "oficina/oficina-api"
+  default     = "oficina-homolog/oficina-api"
 }
 
 variable "eks_nlb_listener_port" {
@@ -82,5 +84,5 @@ variable "enable_vpc_link_integration" {
     fase 2 do apply deste repositório.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }

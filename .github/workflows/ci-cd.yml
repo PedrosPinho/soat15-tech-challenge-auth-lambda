@@ -136,6 +136,7 @@ jobs:
           ENV=homolog
           [ "${{ github.base_ref }}" = "main" ] && ENV=prod
           terraform workspace select -or-create "$ENV"
+          echo "TF_VAR_eks_service_tag_value=oficina-${ENV}/oficina-api" >> "$GITHUB_ENV"
 
       - name: Plan
         id: plan
@@ -202,6 +203,9 @@ jobs:
           ENV=homolog
           [ "${{ github.ref_name }}" = "main" ] && ENV=prod
           terraform workspace select -or-create "$ENV"
+          # Nome do namespace segue "oficina-${ENV}" (ver ci-cd.yml do repo
+          # principal) — tag service.k8s.aws/stack do NLB usa esse namespace.
+          echo "TF_VAR_eks_service_tag_value=oficina-${ENV}/oficina-api" >> "$GITHUB_ENV"
 
       - run: terraform apply -auto-approve -input=false
 
