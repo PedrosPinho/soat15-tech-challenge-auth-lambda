@@ -121,6 +121,12 @@ jobs:
 
       - run: terraform init
 
+      - name: Selecionar workspace
+        run: |
+          ENV=homolog
+          [ "${{ github.base_ref }}" = "main" ] && ENV=prod
+          terraform workspace select -or-create "$ENV"
+
       - name: Plan
         id: plan
         run: |
@@ -170,6 +176,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - run: terraform init
+
+      - name: Selecionar workspace
+        run: |
+          ENV=homolog
+          [ "${{ github.ref_name }}" = "main" ] && ENV=prod
+          terraform workspace select -or-create "$ENV"
 
       - run: terraform apply -auto-approve -input=false
 
