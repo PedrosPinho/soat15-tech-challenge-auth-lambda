@@ -209,11 +209,15 @@ jobs:
         # Não exige que o CPF esteja cadastrado: um 400/404/403 estruturado já
         # prova que a Lambda subiu, alcançou o RDS e respondeu no formato
         # esperado (ver src/token/handler.ts) — só um 5xx/timeout é falha real.
+        # O handler espera um evento no formato APIGatewayProxyEventV2 (lê
+        # event.body como string JSON e event.requestContext.requestId), já
+        # que em produção só é invocado através do API Gateway — nunca
+        # diretamente — por isso o payload simula esse envelope.
         run: |
           FUNCTION_NAME=$(terraform output -raw token_function_name)
           aws lambda invoke \
             --function-name "$FUNCTION_NAME" \
-            --payload '{"cpf":"52998224725"}' \
+            --payload '{"body":"{\"cpf\":\"52998224725\"}","headers":{},"requestContext":{"requestId":"smoke-test"}}' \
             --cli-binary-format raw-in-base64-out \
             response.json
           cat response.json
