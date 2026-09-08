@@ -69,9 +69,9 @@ variable "eks_service_tag_value" {
 }
 
 variable "eks_nlb_listener_port" {
-  description = "Porta do listener do NLB interno do EKS usado como alvo do VPC Link (fase 2 do apply)"
+  description = "Porta do listener do NLB interno do EKS usado como alvo do VPC Link (fase 2 do apply) — bate com a porta do Service em soat15-tech-challenge-01/k8s/service.yaml"
   type        = number
-  default     = 80
+  default     = 3001
 }
 
 variable "enable_vpc_link_integration" {
