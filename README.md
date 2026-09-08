@@ -11,8 +11,21 @@ expõe, provisionados por Terraform em `terraform/`.
 - Lambda Authorizer (`REQUEST`, cache 300s): valida o JWT nas rotas `/api/*`
   (aceita tanto `scope: cliente` quanto `scope: interno`), repassadas via VPC Link
   para o NLB interno do EKS (`k8s-infra`)
-- API Gateway HTTP API: rota pública `POST /auth/token` e rota protegida
+- API Gateway HTTP API: rotas públicas `POST /auth/token` e `POST
+  /api/auth/login` (proxy do login interno da aplicação), e rota protegida
   `ANY /api/{proxy+}`
+
+## Status
+
+Aplicado e validado de ponta a ponta contra a AWS real (`homolog`), endpoint
+público: `https://8vp6dbqs8g.execute-api.us-east-1.amazonaws.com`
+
+```bash
+# Cliente por CPF
+curl -X POST "$ENDPOINT/auth/token" -H "Content-Type: application/json" -d '{"cpf":"52998224725"}'
+# Login interno
+curl -X POST "$ENDPOINT/api/auth/login" -H "Content-Type: application/json" -d '{"email":"admin@oficina.com","senha":"senha123"}'
+```
 
 Justificativa completa da estratégia (por que Lambda + JWT em vez de Cognito, por que
 duas linhas de defesa) em
@@ -53,15 +66,19 @@ momento. Isso é uma correção prática à ordem sugerida originalmente no
 deploy da aplicação) — destacada aqui para revisão.
 
 A solução adotada (`terraform/api_gateway.tf`) usa a flag
-`var.enable_vpc_link_integration` (default `false`) e um `data "aws_lb"` que localiza
-o NLB **dinamicamente**, pela tag `kubernetes.io/service-name` que o AWS Load Balancer
-Controller aplica automaticamente — em vez de tentar referenciar um recurso Terraform
-de outro repositório que ainda não existe.
+`var.enable_vpc_link_integration` e um `data "aws_lb"` que localiza o NLB
+**dinamicamente**, pela tag `service.k8s.aws/stack` que o AWS Load Balancer
+Controller v3.x aplica automaticamente (formato `<namespace>/<nome-do-service>`)
+— em vez de tentar referenciar um recurso Terraform de outro repositório que
+ainda não existe.
 
-**Fase 1** — `terraform apply` com o default (`enable_vpc_link_integration = false`):
-cria a API Gateway, as duas Lambdas e a rota pública `POST /auth/token`. Já é
-suficiente para emitir e validar tokens isoladamente (testes de fumaça, Postman etc).
-A rota `ANY /api/{proxy+}` e o VPC Link **não são criados** nesta fase.
+**Fase 1** — `terraform apply` com `enable_vpc_link_integration = false`: cria
+a API Gateway, as duas Lambdas, a rota pública `POST /auth/token` e a rota
+pública `POST /api/auth/login` (proxy direto para o login interno da
+aplicação — precisa ser pública, é como se emite o primeiro token `interno`).
+Já é suficiente para emitir e validar tokens isoladamente (testes de fumaça,
+Postman etc). A rota `ANY /api/{proxy+}` e o VPC Link **não são criados**
+nesta fase.
 
 **Entre as fases**: aplicar `db-infra`, `k8s-infra`, e então fazer o deploy da
 aplicação no cluster (`kubectl apply` dos manifestos `k8s/` do repositório principal,
@@ -75,10 +92,15 @@ terraform apply -var="enable_vpc_link_integration=true"
 ```
 
 Isso cria o VPC Link, a integração `HTTP_PROXY` e a rota `ANY /api/{proxy+}`
-(protegida pelo Lambda Authorizer). Conferir antes se `var.eks_service_tag_value`
-bate com o `<namespace>/<nome-do-service>` real do Service da aplicação — o default
-(`oficina/oficina-api`) é uma convenção assumida, não confirmada com o repositório da
-aplicação.
+(protegida pelo Lambda Authorizer). O pipeline (`ci-cd.yml`) já calcula
+`TF_VAR_eks_service_tag_value` (`oficina-${ENV}/oficina-api`) a partir do
+workspace/branch — o default de `var.eks_service_tag_value` no `variables.tf`
+é só um fallback para apply manual. Confira também `var.eks_nlb_listener_port`
+(default `3001`, batendo com `k8s/service.yaml` do repositório principal).
+
+**Nesta execução real (`homolog`)**, `enable_vpc_link_integration` já está
+`true` por padrão em `variables.tf` — a fase 2 está ativa e validada em
+produção (ver "Status" abaixo).
 
 ---
 
@@ -176,6 +198,21 @@ terraform apply -var="enable_vpc_link_integration=true"   # fase 2
 Sem credenciais AWS neste ambiente de desenvolvimento: validação local usa
 `terraform init -backend=false` + `terraform validate` + `terraform fmt` (sem
 `plan`/`apply`).
+
+## CI/CD
+
+Pipeline em `.github/workflows/ci-cd.yml`: `test` (type-check + unitários) →
+`build` (esbuild, artefato `lambda-dist`) → `terraform-fmt-validate` → `plan`
+(em PR, comentado no PR) → `apply` (push em `homolog`/`main`) + teste de
+fumaça (invoca a Lambda de token com um CPF de fixture, aceita
+`200`/`400`/`403`/`404` — não exige seed de dados). O job `apply` reempacota
+as Lambdas (`npm ci && npm run package`) porque cada job do GitHub Actions
+roda num runner isolado — artefato de outro job não fica disponível de graça.
+
+**Secrets do GitHub**: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/
+`AWS_SESSION_TOKEN` — credenciais temporárias do Learner Lab, renovadas por
+`scripts/refresh-aws-secrets.sh` (repositório da aplicação) nos 4
+repositórios de uma vez.
 
 ## Ciclo de sessão do Learner Lab
 
