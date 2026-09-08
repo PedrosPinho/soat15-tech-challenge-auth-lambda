@@ -32,8 +32,10 @@
 #     default/terraform.tfvars): com o `Service` já ativo no cluster, `data "aws_lb"`
 #     abaixo localiza o NLB pela tag que o AWS Load Balancer Controller aplica
 #     automaticamente (`kubernetes.io/service-name`). Este segundo apply cria o VPC
-#     Link, a integração `HTTP_PROXY` e a rota `ANY /api/{proxy+}` (protegida pelo
-#     Lambda Authorizer).
+#     Link, a integração `HTTP_PROXY`, a rota `ANY /api/{proxy+}` (protegida pelo
+#     Lambda Authorizer) e a rota pública `POST /api/auth/login` (login interno
+#     e-mail/senha da aplicação -- precisa ser pública, e como se emite o primeiro
+#     token `interno`; rota exata tem prioridade sobre o catch-all acima).
 #
 # Esta é uma correção prática à ordem sugerida originalmente no PHASE_3_PLAN.md (que
 # assumia a Lambda pronta antes do deploy da aplicação) -- registrar para revisão.
@@ -196,4 +198,19 @@ resource "aws_apigatewayv2_route" "api_proxy" {
   target             = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
   authorization_type = "CUSTOM"
   authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+}
+
+# Rota pública, sem autorizador -- login interno (e-mail/senha) da aplicacao
+# principal (`POST /api/auth/login`, ja implementado la e coberto pelos testes
+# daquele repositorio). Precisa ser publica pela natureza da coisa: e como um
+# usuario interno consegue o primeiro token, antes de ter qualquer token.
+# Rotas exatas tem prioridade sobre o catch-all `{proxy+}` acima, entao esta
+# rota mais especifica intercepta so esse path (mesma integracao HTTP_PROXY,
+# que encaminha o path original sem alteracao para o NLB/app).
+resource "aws_apigatewayv2_route" "auth_login" {
+  count = var.enable_vpc_link_integration ? 1 : 0
+
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "POST /api/auth/login"
+  target    = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
 }
