@@ -213,7 +213,7 @@ jobs:
           FUNCTION_NAME=$(terraform output -raw token_function_name)
           aws lambda invoke \
             --function-name "$FUNCTION_NAME" \
-            --payload "$(echo '{"cpf":"52998224725"}' | base64)" \
+            --payload '{"cpf":"52998224725"}' \
             --cli-binary-format raw-in-base64-out \
             response.json
           cat response.json
