@@ -1,5 +1,6 @@
 data "terraform_remote_state" "db_infra" {
-  backend = "s3"
+  backend   = "s3"
+  workspace = "homolog"
 
   config = {
     bucket = "soat15-tc-tfstate-442534931336"

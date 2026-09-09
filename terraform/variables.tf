@@ -21,3 +21,68 @@ variable "jwt_expires_in" {
   type        = string
   default     = "15m"
 }
+
+variable "db_username" {
+  description = "Usuário master do RDS PostgreSQL (a senha vem do SSM, ver ssm.tf). O db-infra não expõe o username como output; valor precisa bater com o default de `db_username` em soat15-tech-challenge-db-infra/variables.tf (\"oficina\")."
+  type        = string
+  default     = "oficina"
+}
+
+variable "lambda_reserved_concurrency" {
+  description = "Concorrência reservada das Lambdas de autenticação, para não esgotar as conexões do RDS (pool de tamanho 1 por execução)"
+  type        = number
+  default     = 5
+}
+
+variable "authorizer_cache_ttl_seconds" {
+  description = "TTL do cache de autorização do API Gateway para o Lambda Authorizer (RFC-003: um cliente desativado pode continuar autorizado pela borda até este TTL expirar)"
+  type        = number
+  default     = 300
+}
+
+variable "throttling_burst_limit" {
+  description = "Throttling (burst) do API Gateway -- segunda linha de defesa, além do express-rate-limit da aplicação"
+  type        = number
+  default     = 10
+}
+
+variable "throttling_rate_limit" {
+  description = "Throttling (rate, req/s) do API Gateway"
+  type        = number
+  default     = 5
+}
+
+variable "eks_service_tag_value" {
+  description = <<-EOT
+    Valor da tag `service.k8s.aws/stack` usada para localizar dinamicamente
+    (via `data "aws_lb"`) o Network Load Balancer interno criado pelo AWS Load
+    Balancer Controller a partir do Service Kubernetes da aplicacao principal.
+
+    Formato aplicado automaticamente pelo controller: "<namespace>/<nome-do-service>".
+    O namespace real e "oficina-homolog"/"oficina-prod" (nao "oficina" -- ver
+    NAMESPACE em soat15-tech-challenge-01/.github/workflows/ci-cd.yml), por
+    isso o pipeline deste repo exporta TF_VAR_eks_service_tag_value calculado
+    a partir do workspace em vez de usar so o default abaixo.
+  EOT
+  type        = string
+  default     = "oficina-homolog/oficina-api"
+}
+
+variable "eks_nlb_listener_port" {
+  description = "Porta do listener do NLB interno do EKS usado como alvo do VPC Link (fase 2 do apply) — bate com a porta do Service em soat15-tech-challenge-01/k8s/service.yaml"
+  type        = number
+  default     = 3001
+}
+
+variable "enable_vpc_link_integration" {
+  description = <<-EOT
+    Controla se a rota `ANY /api/{proxy+}` é integrada ao VPC Link/NLB do EKS.
+
+    Fica `false` até a aplicação principal já estar rodando no cluster com o Service
+    LoadBalancer ativo (o NLB só existe depois disso -- ver a seção "Apply em duas
+    fases" do README). Definir como `true` e rodar `terraform apply` novamente é a
+    fase 2 do apply deste repositório.
+  EOT
+  type        = bool
+  default     = true
+}

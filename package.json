@@ -1,0 +1,34 @@
+{
+  "name": "soat15-tech-challenge-auth-lambda",
+  "version": "1.0.0",
+  "description": "Autenticação serverless por CPF (Lambda de emissão de token + Lambda Authorizer) da Fase 3 do Tech Challenge SOAT",
+  "private": true,
+  "license": "ISC",
+  "scripts": {
+    "build": "npm run build:token && npm run build:authorizer",
+    "build:token": "esbuild src/token/handler.ts --bundle --platform=node --target=node20 --outfile=dist/token/index.js --external:pg-native",
+    "build:authorizer": "esbuild src/authorizer/handler.ts --bundle --platform=node --target=node20 --outfile=dist/authorizer/index.js --external:pg-native",
+    "package": "npm run build && npm run package:token && npm run package:authorizer",
+    "package:token": "cd dist/token && zip -r ../../dist/token.zip index.js",
+    "package:authorizer": "cd dist/authorizer && zip -r ../../dist/authorizer.zip index.js",
+    "type-check": "tsc --noEmit",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "clean": "rm -rf dist coverage"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.152",
+    "@types/jest": "^29.5.14",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^20.19.9",
+    "@types/pg": "^8.15.5",
+    "esbuild": "^0.24.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.3"
+  }
+}
