@@ -214,3 +214,15 @@ resource "aws_apigatewayv2_route" "auth_login" {
   route_key = "POST /api/auth/login"
   target    = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
 }
+
+# Rota pública, sem autorizador -- expõe /health/ready fora do prefixo /api/
+# (o catch-all acima só cobre /api/{proxy+}) para o Synthetics monitor de
+# uptime do New Relic (ver newrelic_alerts.tf em k8s-infra) conseguir checar o
+# healthcheck de fora da VPC, sem precisar de um JWT.
+resource "aws_apigatewayv2_route" "health_ready" {
+  count = var.enable_vpc_link_integration ? 1 : 0
+
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "GET /health/ready"
+  target    = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
+}

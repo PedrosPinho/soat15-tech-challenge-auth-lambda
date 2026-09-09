@@ -11,9 +11,10 @@ expõe, provisionados por Terraform em `terraform/`.
 - Lambda Authorizer (`REQUEST`, cache 300s): valida o JWT nas rotas `/api/*`
   (aceita tanto `scope: cliente` quanto `scope: interno`), repassadas via VPC Link
   para o NLB interno do EKS (`k8s-infra`)
-- API Gateway HTTP API: rotas públicas `POST /auth/token` e `POST
-  /api/auth/login` (proxy do login interno da aplicação), e rota protegida
-  `ANY /api/{proxy+}`
+- API Gateway HTTP API: rotas públicas `POST /auth/token`, `POST
+  /api/auth/login` (proxy do login interno da aplicação) e `GET
+  /health/ready` (fora do prefixo `/api/`, usada pelo Synthetics monitor de
+  uptime do New Relic — ver `k8s-infra`), e rota protegida `ANY /api/{proxy+}`
 
 ## Status
 
@@ -25,6 +26,8 @@ público: `https://8vp6dbqs8g.execute-api.us-east-1.amazonaws.com`
 curl -X POST "$ENDPOINT/auth/token" -H "Content-Type: application/json" -d '{"cpf":"52998224725"}'
 # Login interno
 curl -X POST "$ENDPOINT/api/auth/login" -H "Content-Type: application/json" -d '{"email":"admin@oficina.com","senha":"senha123"}'
+# Healthcheck
+curl "$ENDPOINT/health/ready"
 ```
 
 Justificativa completa da estratégia (por que Lambda + JWT em vez de Cognito, por que
