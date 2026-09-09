@@ -207,9 +207,23 @@ jobs:
           # principal) — tag service.k8s.aws/stack do NLB usa esse namespace.
           echo "TF_VAR_eks_service_tag_value=oficina-${ENV}/oficina-api" >> "$GITHUB_ENV"
 
-      - run: terraform apply -auto-approve -input=false
+      - name: Apply (só em homolog -- prod não é implantado de verdade, ver ADR-007)
+        # Um apply de verdade em `main` teria SUCESSO (não falharia): criaria
+        # Lambdas + API Gateway novos, de verdade, apontando para a MESMA VPC/RDS
+        # de homolog (remote_state.tf lê o workspace "homolog" do db-infra fixo,
+        # não por branch) -- uma pilha de auth duplicada e paga sem isolamento
+        # real. Em `main` o pipeline roda só até `plan`, nunca muta.
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            terraform plan -input=false
+          else
+            terraform apply -auto-approve -input=false
+          fi
 
       - name: Teste de fumaça — invocar a Lambda de token com um CPF de fixture
+        # Só faz sentido em homolog -- em main não existe Lambda de verdade
+        # implantada (apply virou plan acima, ver ADR-007).
+        if: github.ref_name != 'main'
         # Não exige que o CPF esteja cadastrado: um 400/404/403 estruturado já
         # prova que a Lambda subiu, alcançou o RDS e respondeu no formato
         # esperado (ver src/token/handler.ts) — só um 5xx/timeout é falha real.
