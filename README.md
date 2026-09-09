@@ -36,6 +36,42 @@ duas linhas de defesa) em
 no repositório da aplicação, com o diagrama de sequência completo em
 [`sequence-auth.md`](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/sequence-auth.md).
 
+## Diagrama de arquitetura
+
+```mermaid
+flowchart TB
+    Client([Cliente / Usuário interno])
+
+    subgraph APIGW["API Gateway HTTP API"]
+        RouteToken["POST /auth/token\n(pública)"]
+        RouteLogin["POST /api/auth/login\n(pública, proxy)"]
+        RouteHealth["GET /health/ready\n(pública, proxy)"]
+        RouteProxy["ANY /api/{proxy+}\n(protegida)"]
+        Authorizer[Lambda Authorizer\nREQUEST, cache 300s]
+    end
+
+    TokenLambda["Lambda — emite JWT\nscope: cliente"]
+    SSM[[SSM Parameter Store\njwt-secret]]
+    RDS[(RDS PostgreSQL\nvia db-infra)]
+    VPCLink[VPC Link]
+    NLB["NLB interno\n(k8s-infra)"]
+
+    Client -->|CPF| RouteToken --> TokenLambda
+    TokenLambda -.consulta cliente.-> RDS
+    TokenLambda -.lê/assina com.-> SSM
+    Client -->|"/api/*"| RouteProxy
+    RouteProxy -.valida JWT.-> Authorizer
+    Authorizer -.lê.-> SSM
+    RouteProxy --> VPCLink --> NLB
+    Client -->|login interno| RouteLogin --> VPCLink
+    Client -->|Synthetics/uptime| RouteHealth --> VPCLink
+```
+
+Rotas exatas (`/auth/token`, `/api/auth/login`, `/health/ready`) têm
+prioridade sobre o catch-all `/api/{proxy+}` no roteamento do API Gateway v2 —
+por isso as duas últimas conseguem ficar públicas (sem `Authorizer`) mesmo
+usando a mesma integração `HTTP_PROXY`/VPC Link do catch-all protegido.
+
 ## Dependências
 
 - [`db-infra`](https://github.com/PedrosPinho/soat15-tech-challenge-db-infra) —
