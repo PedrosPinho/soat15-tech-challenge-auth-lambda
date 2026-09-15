@@ -40,6 +40,17 @@ function buildPool(): Pool {
     });
   });
 
+  // Obrigatório com pg.Pool: o timer de idleTimeoutMillis do pool não roda enquanto o
+  // container da Lambda está congelado, então o RDS derruba a conexão (idle_session_timeout
+  // acima) antes do pool conseguir reciclá-la sozinho. Sem este listener, o erro do client
+  // ocioso derruba o processo inteiro no próximo cold-restart do container (visto em
+  // produção: "Invalid request ID" seguido de "Internal Server Error" na chamada seguinte).
+  // O pg-pool já remove o client com erro da pool sozinho; só precisamos não deixar o
+  // evento sem listener.
+  newPool.on('error', (err) => {
+    console.error('Erro em client ocioso do pool (conexão será recriada na próxima query)', err);
+  });
+
   return newPool;
 }
 
