@@ -1,5 +1,7 @@
 # Segredos consumidos pelas Lambdas.
 #
+# A Lambda de token NÃO acessa mais o RDS (Fase 4, ADR-015): consulta o OS Service por HTTP.
+#
 # Estratégia escolhida (documentada no README): em vez de dar às Lambdas acesso em
 # runtime ao SSM Parameter Store (o que exigiria um VPC Endpoint de Interface, já que
 # não há NAT Gateway nas subnets privadas), os valores são lidos do SSM apenas no
@@ -8,13 +10,6 @@
 # VPC Endpoint, ao custo de a Lambda precisar ser reimplantada (novo `apply`) sempre
 # que o segredo rotacionar — aceitável neste projeto, dado o ciclo de
 # destroy/apply por sessão do Learner Lab.
-
-# Senha do RDS, criada pelo repositório `db-infra` (SecureString). O nome do parâmetro
-# é exposto no remote state daquele repositório (`db_secret_param_name`).
-data "aws_ssm_parameter" "db_password" {
-  name            = data.terraform_remote_state.db_infra.outputs.db_secret_param_name
-  with_decryption = true
-}
 
 # JWT_SECRET: o MESMO segredo é usado pela Lambda de emissão de token (para assinar),
 # pelo Lambda Authorizer (para validar) e pela aplicação principal no EKS (para

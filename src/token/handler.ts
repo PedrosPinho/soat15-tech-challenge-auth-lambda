@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import jwt from 'jsonwebtoken';
 import { validateCpf } from '../shared/cpf-validator';
-import { findClienteByCpf } from '../shared/db';
+import { findClienteByCpf } from '../shared/cliente-client';
 
 /**
  * Handler `POST /auth/token` — emissão de JWT a partir do CPF do cliente.
@@ -72,7 +72,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   try {
     cliente = await findClienteByCpf(digits);
   } catch (error) {
-    logStructured('error', 'Falha ao consultar cliente no RDS', {
+    logStructured('error', 'Falha ao consultar cliente no OS Service', {
       correlationId,
       error: error instanceof Error ? error.message : String(error),
     });
