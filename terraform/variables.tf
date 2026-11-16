@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "lab_role_arn" {
   description = "ARN da LabRole pré-criada pelo AWS Academy Learner Lab (role de execução das Lambdas)"
   type        = string
-  default     = "arn:aws:iam::442534931336:role/LabRole"
+  default     = "arn:aws:iam::368596537549:role/LabRole"
 }
 
 variable "project_name" {
