@@ -1,44 +1,37 @@
 # API Gateway (HTTP API) -- rota pública de emissão de token e rota protegida que
-# encaminha para a aplicação no EKS.
+# encaminha para os serviços no EKS (via ALB interno).
 #
 # *** IMPORTANTE: apply em duas fases -- leia antes de rodar `terraform apply` ***
 #
-# Existe uma dependência circular de ordem entre este repositório e a aplicação:
-#   - O VPC Link precisa apontar para o Network Load Balancer (NLB) interno que expõe
-#     a API do EKS.
-#   - Esse NLB só é criado pelo AWS Load Balancer Controller quando o `Service`
-#     Kubernetes tipo LoadBalancer (definido no repositório da aplicação, `k8s/`) é
-#     aplicado -- o que só acontece DEPOIS que os 3 repositórios de infra (db-infra,
-#     k8s-infra, este) já estiverem de pé.
+# Existe uma dependência circular de ordem entre este repositório e os serviços:
+#   - O VPC Link precisa apontar para o listener do Application Load Balancer (ALB)
+#     interno que expõe os 3 serviços (OS, Billing, Execution) no EKS (Fase 4, ADR-013).
+#   - Esse ALB só é criado pelo AWS Load Balancer Controller quando os Ingress do grupo
+#     `oficina-<env>` (manifests `k8s/ingress.yaml` de cada serviço) são aplicados -- o
+#     que só acontece DEPOIS que os repositórios de infra (db-infra, k8s-infra) e ao menos
+#     um serviço já estiverem de pé.
 #
-# Ou seja: não dá para criar o VPC Link/integração de `/api/*` na mesma vez em que se
-# cria o restante deste Terraform, porque o NLB alvo ainda não existe.
+# Resolvido com `var.enable_vpc_link_integration` + `data "aws_lb"` filtrando o ALB por
+# tag (`ingress.k8s.aws/stack = <group.name>`), em vez de referenciar um recurso de outro
+# repositório que ainda não existe:
 #
-# Resolvido com `var.enable_vpc_link_integration` (default `false`) + `data "aws_lb"`
-# filtrando pelo NLB por tag, em vez de tentar referenciar um recurso Terraform de
-# outro repositório que ainda não existe:
+#   FASE 1 (`enable_vpc_link_integration = false`): `terraform apply` cria a API Gateway,
+#     as Lambdas e a rota pública `POST /auth/token` (a Lambda de token só consegue emitir
+#     depois da fase 2, pois consulta o OS Service pelo ALB). Sem VPC Link nem rotas /api/*.
 #
-#   FASE 1 (`enable_vpc_link_integration = false`, valor padrão):
-#     `terraform apply` cria a API Gateway, as duas Lambdas e a rota pública
-#     `POST /auth/token`. Já é suficiente para emitir tokens e testar a autenticação
-#     isoladamente. A rota `ANY /api/{proxy+}` e o VPC Link NÃO são criados nesta fase
-#     (não haveria alvo válido).
+#   >> Entre as fases: aplicar `db-infra`, `k8s-infra` e fazer o deploy dos serviços.
 #
-#   >> Entre as fases: aplicar `db-infra`, `k8s-infra` e então fazer o deploy da
-#      aplicação no cluster (`kubectl apply` dos manifestos `k8s/` do repositório
-#      principal, incluindo o `Service` LoadBalancer). Só depois disso o NLB existe.
+#   FASE 2 (`enable_vpc_link_integration = true`, o default): cria o VPC Link, a integração
+#     `HTTP_PROXY` para o listener do ALB e as rotas:
+#       - `ANY /api/{proxy+}`                        protegida pelo Lambda Authorizer;
+#       - `POST /api/auth/login`                     pública (primeiro token `interno`);
+#       - `POST /api/pagamentos/webhooks/mercadopago` pública (assinatura HMAC no Billing);
+#       - `GET /health/ready`                        pública (Synthetics do New Relic).
+#     O roteamento por serviço (/api/ordens-servico -> OS, /api/orcamentos -> Billing,
+#     /api/execucoes -> Execution...) é feito pelo Ingress/ALB, não por rotas do API Gateway.
+#     `/internal/*` NÃO tem rota aqui: só é alcançável de dentro da VPC (Lambda de token).
 #
-#   FASE 2 (`terraform apply -var="enable_vpc_link_integration=true"`, ou ajustando o
-#     default/terraform.tfvars): com o `Service` já ativo no cluster, `data "aws_lb"`
-#     abaixo localiza o NLB pela tag que o AWS Load Balancer Controller aplica
-#     automaticamente (`kubernetes.io/service-name`). Este segundo apply cria o VPC
-#     Link, a integração `HTTP_PROXY`, a rota `ANY /api/{proxy+}` (protegida pelo
-#     Lambda Authorizer) e a rota pública `POST /api/auth/login` (login interno
-#     e-mail/senha da aplicação -- precisa ser pública, e como se emite o primeiro
-#     token `interno`; rota exata tem prioridade sobre o catch-all acima).
-#
-# Esta é uma correção prática à ordem sugerida originalmente no PHASE_3_PLAN.md (que
-# assumia a Lambda pronta antes do deploy da aplicação) -- registrar para revisão.
+# Correção prática à ordem do PHASE_3_PLAN.md -- registrada para revisão.
 
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "${var.project_name}-auth-api"
@@ -127,18 +120,18 @@ resource "aws_lambda_permission" "apigw_invoke_authorizer" {
 }
 
 # ---------------------------------------------------------------------------
-# FASE 2 -- rota protegida ANY /api/{proxy+} via VPC Link para o NLB do EKS.
+# FASE 2 -- rota protegida ANY /api/{proxy+} via VPC Link para o ALB do EKS.
 # Só existe quando var.enable_vpc_link_integration = true. Ver nota no topo do
 # arquivo.
 # ---------------------------------------------------------------------------
 
 resource "aws_security_group" "vpc_link" {
   name        = "${var.project_name}-vpc-link-sg"
-  description = "Security group do VPC Link do API Gateway em direcao ao NLB interno do EKS"
+  description = "Security group do VPC Link do API Gateway em direcao ao ALB interno do EKS"
   vpc_id      = data.terraform_remote_state.db_infra.outputs.vpc_id
 
   egress {
-    description = "Trafego para o NLB interno do EKS"
+    description = "Trafego para o ALB interno do EKS"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -150,24 +143,22 @@ resource "aws_security_group" "vpc_link" {
   }
 }
 
-# Localiza dinamicamente o NLB interno criado pelo AWS Load Balancer Controller a
-# partir do Service Kubernetes tipo LoadBalancer da aplicacao (repositorio principal,
-# k8s/service.yaml). Controller v3.x tageia com `service.k8s.aws/stack` (não mais
-# `kubernetes.io/service-name`, usada só por versões antigas) no formato
-# "<namespace>/<nome-do-service>".
-data "aws_lb" "eks_internal_nlb" {
+# Localiza o ALB interno único criado pelo AWS Load Balancer Controller a partir dos
+# Ingress dos 3 serviços (mesmo `group.name`, ADR-013). O controller tageia o ALB do grupo
+# com `ingress.k8s.aws/stack = <group.name>`.
+data "aws_lb" "eks_internal_alb" {
   count = var.enable_vpc_link_integration ? 1 : 0
 
   tags = {
-    "service.k8s.aws/stack" = var.eks_service_tag_value
+    "ingress.k8s.aws/stack" = var.eks_ingress_group
   }
 }
 
-data "aws_lb_listener" "eks_internal_nlb" {
+data "aws_lb_listener" "eks_internal_alb" {
   count = var.enable_vpc_link_integration ? 1 : 0
 
-  load_balancer_arn = data.aws_lb.eks_internal_nlb[0].arn
-  port              = var.eks_nlb_listener_port
+  load_balancer_arn = data.aws_lb.eks_internal_alb[0].arn
+  port              = var.eks_alb_listener_port
 }
 
 resource "aws_apigatewayv2_vpc_link" "eks" {
@@ -184,7 +175,7 @@ resource "aws_apigatewayv2_integration" "eks_proxy" {
   api_id               = aws_apigatewayv2_api.http_api.id
   integration_type     = "HTTP_PROXY"
   integration_method   = "ANY"
-  integration_uri      = data.aws_lb_listener.eks_internal_nlb[0].arn
+  integration_uri      = data.aws_lb_listener.eks_internal_alb[0].arn
   connection_type      = "VPC_LINK"
   connection_id        = aws_apigatewayv2_vpc_link.eks[0].id
   timeout_milliseconds = 29000
@@ -206,7 +197,7 @@ resource "aws_apigatewayv2_route" "api_proxy" {
 # usuario interno consegue o primeiro token, antes de ter qualquer token.
 # Rotas exatas tem prioridade sobre o catch-all `{proxy+}` acima, entao esta
 # rota mais especifica intercepta so esse path (mesma integracao HTTP_PROXY,
-# que encaminha o path original sem alteracao para o NLB/app).
+# que encaminha o path original sem alteracao para o ALB).
 resource "aws_apigatewayv2_route" "auth_login" {
   count = var.enable_vpc_link_integration ? 1 : 0
 
@@ -224,5 +215,17 @@ resource "aws_apigatewayv2_route" "health_ready" {
 
   api_id    = aws_apigatewayv2_api.http_api.id
   route_key = "GET /health/ready"
+  target    = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
+}
+
+# Rota pública, sem autorizador -- webhook do Mercado Pago (Billing Service). O MP não
+# envia JWT; a autenticidade é garantida pela validação da assinatura HMAC `x-signature`
+# dentro do próprio Billing (ADR-014). Rota exata tem prioridade sobre o catch-all
+# `ANY /api/{proxy+}`; o ALB roteia `/api/pagamentos` para o Billing Service pelo Ingress.
+resource "aws_apigatewayv2_route" "mercadopago_webhook" {
+  count = var.enable_vpc_link_integration ? 1 : 0
+
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "POST /api/pagamentos/webhooks/mercadopago"
   target    = "integrations/${aws_apigatewayv2_integration.eks_proxy[0].id}"
 }

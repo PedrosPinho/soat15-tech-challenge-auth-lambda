@@ -5,8 +5,8 @@
 # repositório da aplicação principal.
 #
 # Rede: as duas Lambdas ficam nas subnets privadas exportadas pelo `db-infra` (mesma
-# VPC do RDS). Sem NAT Gateway na VPC — por isso os segredos (connection string do
-# RDS, JWT_SECRET) são lidos do SSM Parameter Store apenas no momento do
+# VPC). A de token alcança o ALB interno (OS Service) pela rede da VPC; ela NÃO acessa
+# mais o RDS. Sem NAT Gateway na VPC — por isso os segredos (JWT_SECRET) são lidos do SSM Parameter Store apenas no momento do
 # `terraform apply` (`data "aws_ssm_parameter"` em `ssm.tf`) e injetados como
 # variáveis de ambiente da Lambda, em vez de a Lambda precisar alcançar o SSM em
 # runtime através de um VPC Endpoint de Interface. Ver README para a justificativa
@@ -20,19 +20,18 @@
 # atualizado depois que este repositório existisse). Este repositório só anexa a
 # função Lambda a esse SG via `lambda_auth_security_group_id` do remote state.
 locals {
-  db_endpoint = data.terraform_remote_state.db_infra.outputs.db_endpoint
-  db_port     = data.terraform_remote_state.db_infra.outputs.db_port
-  db_name     = data.terraform_remote_state.db_infra.outputs.db_name
-
   lambda_security_group_id = data.terraform_remote_state.db_infra.outputs.lambda_auth_security_group_id
 
-  database_url = "postgresql://${var.db_username}:${urlencode(data.aws_ssm_parameter.db_password.value)}@${local.db_endpoint}:${local.db_port}/${local.db_name}"
+  # Sem ALB (enable_vpc_link_integration = false) não há URL interna: a Lambda de token
+  # sobe sem ela e responde 500 até a fase 2 do apply (o ALB só existe depois do deploy
+  # dos serviços).
+  internal_base_url = var.enable_vpc_link_integration ? "http://${data.aws_lb.eks_internal_alb[0].dns_name}" : ""
 
-  common_lambda_env = {
-    DATABASE_URL   = local.database_url
-    DATABASE_SSL   = "true"
-    JWT_SECRET     = aws_ssm_parameter.jwt_secret.value
-    JWT_EXPIRES_IN = var.jwt_expires_in
+  token_lambda_env = {
+    INTERNAL_BASE_URL  = local.internal_base_url
+    INTERNAL_API_TOKEN = var.internal_api_token
+    JWT_SECRET         = aws_ssm_parameter.jwt_secret.value
+    JWT_EXPIRES_IN     = var.jwt_expires_in
   }
 }
 
@@ -48,7 +47,7 @@ resource "aws_cloudwatch_log_group" "authorizer" {
 
 resource "aws_lambda_function" "token" {
   function_name = "${var.project_name}-auth-token"
-  description   = "Emite JWT a partir do CPF do cliente (POST /auth/token)"
+  description   = "Emite JWT a partir do CPF do cliente (POST /auth/token), consultando o OS Service via ALB interno"
 
   filename         = "${path.module}/../dist/token.zip"
   source_code_hash = fileexists("${path.module}/../dist/token.zip") ? filebase64sha256("${path.module}/../dist/token.zip") : null
@@ -67,7 +66,7 @@ resource "aws_lambda_function" "token" {
   }
 
   environment {
-    variables = local.common_lambda_env
+    variables = local.token_lambda_env
   }
 
   depends_on = [aws_cloudwatch_log_group.token]
