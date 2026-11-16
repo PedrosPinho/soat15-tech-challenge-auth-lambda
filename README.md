@@ -7,11 +7,14 @@ expõe, provisionados por Terraform em `terraform/`.
 ## Escopo deste repositório
 
 - `POST /auth/token`: recebe `{ cpf }`, valida os dígitos verificadores, consulta o
-  cliente no RDS (via `db-infra`) e emite um JWT (`scope: cliente`)
+  cliente no **OS Service** (`GET /internal/clientes/by-cpf/:cpf`, ALB interno, `x-internal-token` — Fase 4,
+  [ADR-015](https://github.com/PedrosPinho/soat15-tech-challenge-01/blob/main/docs/architecture/adrs/ADR-015-lambda-de-auth-via-http.md);
+  a Lambda **não acessa mais o banco**) e emite um JWT (`scope: cliente`)
 - Lambda Authorizer (`REQUEST`, cache 300s): valida o JWT nas rotas `/api/*`
   (aceita tanto `scope: cliente` quanto `scope: interno`), repassadas via VPC Link
-  para o NLB interno do EKS (`k8s-infra`)
+  para o **ALB interno** do EKS (IngressGroup `oficina-<env>`, ADR-013), que roteia por path para OS, Billing e Execution
 - API Gateway HTTP API: rotas públicas `POST /auth/token`, `POST
+  /api/pagamentos/webhooks/mercadopago` (webhook do Mercado Pago, autenticado por assinatura HMAC no Billing), `POST
   /api/auth/login` (proxy do login interno da aplicação) e `GET
   /health/ready` (fora do prefixo `/api/`, usada pelo Synthetics monitor de
   uptime do New Relic — ver `k8s-infra`), e rota protegida `ANY /api/{proxy+}`
@@ -52,22 +55,24 @@ flowchart TB
 
     TokenLambda["Lambda — emite JWT\nscope: cliente"]
     SSM[[SSM Parameter Store\njwt-secret]]
-    RDS[(RDS PostgreSQL\nvia db-infra)]
+    OS["OS Service\n/internal/clientes/by-cpf"]
     VPCLink[VPC Link]
-    NLB["NLB interno\n(k8s-infra)"]
+    ALB["ALB interno\n(IngressGroup dos 3 serviços)"]
 
     Client -->|CPF| RouteToken --> TokenLambda
-    TokenLambda -.consulta cliente.-> RDS
+    TokenLambda -.HTTP + x-internal-token.-> ALB
+    ALB --> OS
     TokenLambda -.lê/assina com.-> SSM
     Client -->|"/api/*"| RouteProxy
     RouteProxy -.valida JWT.-> Authorizer
     Authorizer -.lê.-> SSM
-    RouteProxy --> VPCLink --> NLB
+    RouteProxy --> VPCLink --> ALB
+    Client -->|webhook MP| RouteMP["POST /api/pagamentos/webhooks/mercadopago\n(pública)"] --> VPCLink
     Client -->|login interno| RouteLogin --> VPCLink
     Client -->|Synthetics/uptime| RouteHealth --> VPCLink
 ```
 
-Rotas exatas (`/auth/token`, `/api/auth/login`, `/health/ready`) têm
+Rotas exatas (`/auth/token`, `/api/auth/login`, `/api/pagamentos/webhooks/mercadopago`, `/health/ready`) têm
 prioridade sobre o catch-all `/api/{proxy+}` no roteamento do API Gateway v2 —
 por isso as duas últimas conseguem ficar públicas (sem `Authorizer`) mesmo
 usando a mesma integração `HTTP_PROXY`/VPC Link do catch-all protegido.
@@ -75,11 +80,11 @@ usando a mesma integração `HTTP_PROXY`/VPC Link do catch-all protegido.
 ## Dependências
 
 - [`db-infra`](https://github.com/PedrosPinho/soat15-tech-challenge-db-infra) —
-  VPC, endpoint/porta/nome do RDS, senha do RDS (SSM), security group já pronto para
-  a Lambda (`lambda_auth_security_group_id`, com o SG do RDS já liberando ingress
-  5432 para ele)
-- [`k8s-infra`](https://github.com/PedrosPinho/soat15-tech-challenge-k8s-infra) — NLB
-  interno para o VPC Link (só necessário na fase 2 do apply, ver abaixo)
+  VPC, subnets privadas e security group da Lambda (`lambda_auth_security_group_id`).
+  O SG do RDS **não** libera mais a Lambda (Fase 4).
+- [`k8s-infra`](https://github.com/PedrosPinho/soat15-tech-challenge-k8s-infra) e os
+  serviços — ALB interno do IngressGroup (só necessário na fase 2 do apply, ver abaixo)
+- `INTERNAL_API_TOKEN` (GitHub Secret, exportado como `TF_VAR_internal_api_token`): o mesmo valor dos serviços
 
 Aplicar (fase 1) **depois** de `db-infra`. A fase 2 (VPC Link) só depois que a
 aplicação principal já estiver rodando no EKS — ver a seção seguinte.
@@ -91,40 +96,40 @@ aplicação principal já estiver rodando no EKS — ver a seção seguinte.
 Existe uma dependência circular de ordem entre este repositório e a aplicação
 principal:
 
-- O VPC Link do API Gateway precisa apontar para o **Network Load Balancer (NLB)
-  interno** que expõe a API do EKS.
-- Esse NLB só é criado pelo **AWS Load Balancer Controller** quando o `Service`
-  Kubernetes tipo `LoadBalancer` (definido no repositório da aplicação, `k8s/`) é
-  aplicado — e isso só acontece **depois** que os 3 repositórios de infraestrutura
-  (`db-infra`, `k8s-infra`, este) já estiverem de pé.
+- O VPC Link do API Gateway precisa apontar para o listener do **Application Load
+  Balancer (ALB) interno** que expõe os 3 serviços (Fase 4, ADR-013).
+- Esse ALB só é criado pelo **AWS Load Balancer Controller** quando os `Ingress` do grupo
+  `oficina-<env>` (`k8s/ingress.yaml` de cada serviço) são aplicados — e isso só acontece
+  **depois** que `db-infra`, `k8s-infra` e ao menos um serviço estiverem de pé. O ALB é
+  localizado pela tag `ingress.k8s.aws/stack = oficina-<env>`.
+- A Lambda de token também usa a URL desse ALB (`INTERNAL_BASE_URL`): só emite tokens após a fase 2.
 
 Ou seja: **não é possível criar o VPC Link e a integração de `/api/*` no mesmo
-`apply` que cria o resto deste Terraform**, porque o NLB alvo ainda não existe nesse
+`apply` que cria o resto deste Terraform**, porque o ALB alvo ainda não existe nesse
 momento. Isso é uma correção prática à ordem sugerida originalmente no
 `PHASE_3_PLAN.md` do repositório principal (que assumia a Lambda pronta antes do
 deploy da aplicação) — destacada aqui para revisão.
 
 A solução adotada (`terraform/api_gateway.tf`) usa a flag
-`var.enable_vpc_link_integration` e um `data "aws_lb"` que localiza o NLB
-**dinamicamente**, pela tag `service.k8s.aws/stack` que o AWS Load Balancer
-Controller v3.x aplica automaticamente (formato `<namespace>/<nome-do-service>`)
+`var.enable_vpc_link_integration` e um `data "aws_lb"` que localiza o ALB
+**dinamicamente**, pela tag `ingress.k8s.aws/stack` que o AWS Load Balancer
+Controller aplica automaticamente (valor = `group.name` dos Ingress, `oficina-<env>`)
 — em vez de tentar referenciar um recurso Terraform de outro repositório que
 ainda não existe.
 
 **Fase 1** — `terraform apply` com `enable_vpc_link_integration = false`: cria
 a API Gateway, as duas Lambdas, a rota pública `POST /auth/token` e a rota
 pública `POST /api/auth/login` (proxy direto para o login interno da
-aplicação — precisa ser pública, é como se emite o primeiro token `interno`).
+aplicação — precisa ser pública, é como se emite o primeiro token `interno`); a rota pública do webhook do Mercado Pago (`POST /api/pagamentos/webhooks/mercadopago`) só existe na fase 2.
 Já é suficiente para emitir e validar tokens isoladamente (testes de fumaça,
 Postman etc). A rota `ANY /api/{proxy+}` e o VPC Link **não são criados**
 nesta fase.
 
 **Entre as fases**: aplicar `db-infra`, `k8s-infra`, e então fazer o deploy da
-aplicação no cluster (`kubectl apply` dos manifestos `k8s/` do repositório principal,
-incluindo o `Service` LoadBalancer). Só depois disso o NLB existe e pode ser
-localizado pela tag.
+aplicação no cluster (`kubectl apply` dos manifestos `k8s/` dos serviços, incluindo os
+`Ingress`). Só depois disso o ALB existe e pode ser localizado pela tag.
 
-**Fase 2** — com o `Service` já ativo no cluster:
+**Fase 2** — com os `Ingress` já ativos no cluster:
 
 ```bash
 terraform apply -var="enable_vpc_link_integration=true"
@@ -150,13 +155,11 @@ Lambda em subnet privada não alcança o SSM Parameter Store em runtime a menos 
 exista um VPC Endpoint de Interface (que tem custo por hora e mais uma peça
 operacional para manter).
 
-Em vez disso, este repositório usa `data "aws_ssm_parameter"` (`terraform/ssm.tf`)
-para ler a senha do RDS (criada pelo `db-infra`) **apenas no momento do
-`terraform apply`**, e injeta o valor já resolvido como variável de ambiente da
-Lambda (`DATABASE_URL` completa, montada em `lambdas.tf`). A Lambda em si nunca
-precisa alcançar o SSM em runtime — mais simples e sem custo adicional de VPC
-Endpoint, ao custo de precisar de um novo `apply` sempre que a senha do RDS rotacionar
-(aceitável neste projeto, dado o ciclo destroy/apply por sessão do Learner Lab).
+Em vez disso, este repositório lê o `JWT_SECRET` do SSM **apenas no momento do
+`terraform apply`** e injeta o valor já resolvido como variável de ambiente da Lambda.
+(Na Fase 3 também se lia a senha do RDS desse jeito; na Fase 4 a Lambda não toca mais o
+banco.) A Lambda em si nunca precisa alcançar o SSM em runtime — mais simples e sem custo
+de VPC Endpoint, ao custo de um novo `apply` quando o segredo rotacionar.
 
 ## `JWT_SECRET` compartilhado entre este repositório e a aplicação principal
 
@@ -176,22 +179,12 @@ documentado também no `README`/Terraform da aplicação principal como uma depe
 cross-repositório explícita. Se o valor divergir entre os dois lados, a validação
 local da aplicação rejeita tokens legítimos emitidos pela Lambda.
 
-## Usuário do RDS
-
-`var.db_username` (default `"oficina"`) precisa bater com o `db_username` real
-provisionado pelo `db-infra` (`soat15-tech-challenge-db-infra/variables.tf`, também
-default `"oficina"`) — o `db-infra` não expõe o username como output porque é uma
-convenção fixa entre os dois repositórios, não um segredo.
-
 ## Security group da Lambda
 
-O security group das Lambdas **não é criado neste repositório**. O `db-infra` já cria
-um SG placeholder dedicado (`aws_security_group.lambda_auth`, em
-`db-infra/security_groups.tf`) e o SG do RDS já libera ingress na porta 5432 para ele
-desde a criação — porque `db-infra` é aplicado primeiro, e só essa ordem evita uma
-dependência circular (se o SG vivesse aqui, o SG do RDS teria que ser atualizado
-depois que este repositório existisse). Este repositório só anexa as funções Lambda a
-esse SG via `data.terraform_remote_state.db_infra.outputs.lambda_auth_security_group_id`.
+O security group das Lambdas **não é criado neste repositório**: vem do `db-infra`
+(`aws_security_group.lambda_auth`) via
+`data.terraform_remote_state.db_infra.outputs.lambda_auth_security_group_id`. Na Fase 4 ele
+só precisa de **egress** (para o ALB interno); o SG do RDS não o referencia mais.
 
 ## Respostas de erro de autenticação
 
@@ -208,14 +201,14 @@ terraform/
   backend.tf, provider.tf, versions.tf, variables.tf, remote_state.tf  # bootstrap
   lambdas.tf       # Lambdas (token + authorizer), role LabRole, VPC config
   api_gateway.tf   # HTTP API, rotas, authorizer, VPC Link (fase 2), throttling
-  ssm.tf           # segredos (senha do RDS via data source, JWT_SECRET gerado)
+  ssm.tf           # JWT_SECRET gerado
   outputs.tf
 src/
   token/handler.ts       # handler POST /auth/token
   authorizer/handler.ts  # handler do Lambda Authorizer (REQUEST)
   shared/
     cpf-validator.ts     # validação de dígitos verificadores (portado de cpf-cnpj.vo.ts)
-    db.ts                 # client pg (pool de tamanho 1)
+    cliente-client.ts     # HTTP para o OS Service (/internal/clientes/by-cpf)
 tests/            # Jest -- validação de CPF e decisão do authorizer
 ```
 

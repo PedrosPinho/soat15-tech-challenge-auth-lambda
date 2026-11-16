@@ -90,6 +90,21 @@ export function decodeAndValidateToken(token: string, secret: string): TokenClai
   return null;
 }
 
+/**
+ * O cache do authorizer (authorizer_result_ttl_in_seconds, api_gateway.tf) é
+ * indexado só pelo identity source (header Authorization), não por rota/método —
+ * então a policy retornada aqui pode ser reaproveitada pelo API Gateway para
+ * QUALQUER rota chamada em seguida com o mesmo token, não só a que gerou esta
+ * invocação. Sem isso, o primeiro Allow fica restrito ao método/recurso exato de
+ * `event.methodArn` (ex.: só `GET /api/clientes`), e a próxima chamada com o
+ * mesmo token para outra rota (ex.: `POST /api/veiculos`) é negada contra essa
+ * policy em cache — 403 genérico do API Gateway, visto num teste real.
+ */
+function buildWildcardResource(methodArn: string): string {
+  const [arnPrefix, stage] = methodArn.split('/');
+  return `${arnPrefix}/${stage}/*/*`;
+}
+
 function buildPolicy(
   principalId: string,
   effect: 'Allow' | 'Deny',
@@ -114,7 +129,7 @@ function buildPolicy(
 
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
   const correlationId = event.headers?.['x-correlation-id'] ?? event.requestContext?.requestId;
-  const resource = event.methodArn;
+  const resource = buildWildcardResource(event.methodArn);
 
   const token = extractToken(event);
   if (!token) {
